@@ -3,4 +3,3 @@ pandas
 openpyxl
 reportlab
 python-dateutil
-pywin32
