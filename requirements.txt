@@ -1,5 +1,7 @@
 streamlit
 pandas
-openpyxl
 reportlab
 python-dateutil
+PyMuPDF
+Pillow
+openpyxl
