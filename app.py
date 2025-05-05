@@ -220,9 +220,14 @@ else:
                 st.dataframe(filtered_df)
 
             if not filtered_df.empty:
-                if st.button("📥 Download MRP Label PDF"):
-                    pdf = generate_pdf(filtered_df)
-                    st.download_button("⬇️ Download Label", data=pdf, file_name=f"{safe_name}_Label.pdf", mime="application/pdf")
+                # Direct MRP label download
+                label_pdf = generate_pdf(filtered_df)
+                st.download_button(
+                    "📥 Download MRP Label",
+                    data=label_pdf,
+                    file_name=f"{safe_name}_Label.pdf",
+                    mime="application/pdf"
+                )
 
                 if 'FNSKU' in filtered_df.columns and os.path.exists(BARCODE_PDF_PATH):
                     fnsku_code = str(filtered_df.iloc[0]['FNSKU']).strip()
