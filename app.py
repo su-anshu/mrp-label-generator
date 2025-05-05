@@ -10,15 +10,43 @@ import random
 import os
 import fitz  # PyMuPDF
 from PIL import Image
+import re
 
 # Constants
 LABEL_WIDTH = 48 * mm
 LABEL_HEIGHT = 25 * mm
 DATA_PATH = "data/latest_data.xlsx"
 BARCODE_PDF_PATH = "data/master_fnsku.pdf"
+BACKUP_DIR = "data/backups"
 
-# Create data directory if it doesn't exist
+# Ensure directories exist
 os.makedirs("data", exist_ok=True)
+os.makedirs(BACKUP_DIR, exist_ok=True)
+
+def sanitize_filename(name):
+    return re.sub(r'\W+', '_', name)
+
+def load_data():
+    return pd.read_excel(DATA_PATH)
+
+def backup_file(original_path, prefix):
+    if os.path.exists(original_path):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ext = os.path.splitext(original_path)[-1]
+        backup_filename = f"{prefix}_{timestamp}{ext}"
+        backup_path = os.path.join(BACKUP_DIR, backup_filename)
+        with open(original_path, "rb") as src, open(backup_path, "wb") as dst:
+            dst.write(src.read())
+        return backup_path
+    return None
+
+def clear_files():
+    deleted = []
+    for path in [DATA_PATH, BARCODE_PDF_PATH]:
+        if os.path.exists(path):
+            os.remove(path)
+            deleted.append(path)
+    return deleted
 
 def generate_pdf(dataframe):
     buffer = BytesIO()
@@ -32,16 +60,18 @@ def generate_pdf(dataframe):
     for _, row in dataframe.iterrows():
         name = str(row['Name'])
         weight = str(row['Net Weight'])
-        mrp = f"INR {int(float(row['M.R.P']))}"
+        try:
+            mrp = f"INR {int(float(row['M.R.P']))}"
+        except:
+            mrp = "INR N/A"
 
         try:
-            fssai = str(int(float(row['M.F.G. FSAAI'])))
+            fssai = str(int(float(row['M.F.G. FSSAI'])))
         except:
             fssai = "N/A"
 
         product_prefix = ''.join(filter(str.isalnum, name.upper()))[:2]
-        random_suffix = str(random.randint(1, 999)).zfill(3)
-        batch_code = f"{product_prefix}{date_code}{random_suffix}"
+        batch_code = f"{product_prefix}{date_code}{str(random.randint(1, 999)).zfill(3)}"
 
         c.setFont("Helvetica-Bold", 6)
         c.drawString(2 * mm, 22 * mm, f"Name: {name}")
@@ -60,8 +90,7 @@ def extract_fnsku_page(fnsku_code, pdf_path):
     try:
         doc = fitz.open(pdf_path)
         for i, page in enumerate(doc):
-            text = page.get_text()
-            if fnsku_code in text:
+            if fnsku_code in page.get_text():
                 single_page_pdf = fitz.open()
                 single_page_pdf.insert_pdf(doc, from_page=i, to_page=i)
                 buffer = BytesIO()
@@ -76,34 +105,27 @@ def generate_combined_label_pdf(mrp_df, fnsku_code, barcode_pdf_path):
     buffer = BytesIO()
     mrp_label_buffer = generate_pdf(mrp_df)
 
-    # Extract FNSKU barcode image
     try:
         doc = fitz.open(barcode_pdf_path)
-        barcode_pix = None
-        for i, page in enumerate(doc):
+        for page in doc:
             if fnsku_code in page.get_text():
                 barcode_pix = page.get_pixmap(dpi=300)
                 break
+        else:
+            return None
     except Exception as e:
         print("Error reading barcode PDF:", e)
         return None
 
-    if not barcode_pix:
-        return None
-
-    # Convert both to images
-    mrp_img = None
     try:
         mrp_pdf = fitz.open(stream=mrp_label_buffer.read(), filetype="pdf")
         mrp_pix = mrp_pdf[0].get_pixmap(dpi=300)
         mrp_img = Image.open(BytesIO(mrp_pix.tobytes("png")))
+        barcode_img = Image.open(BytesIO(barcode_pix.tobytes("png")))
     except Exception as e:
-        print("Error converting MRP PDF to image:", e)
+        print("Error converting PDFs to images:", e)
         return None
 
-    barcode_img = Image.open(BytesIO(barcode_pix.tobytes("png")))
-
-    # Create new combined PDF canvas
     c = canvas.Canvas(buffer, pagesize=(96 * mm, 25 * mm))
     c.drawImage(ImageReader(mrp_img), 0, 0, width=48 * mm, height=25 * mm)
     c.drawImage(ImageReader(barcode_img), 48 * mm, 0, width=48 * mm, height=25 * mm)
@@ -112,112 +134,114 @@ def generate_combined_label_pdf(mrp_df, fnsku_code, barcode_pdf_path):
     buffer.seek(0)
     return buffer
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
+# ----------------------------- UI -----------------------------
+
 st.set_page_config(page_title="MRP Label Generator", layout="centered")
 st.title("📦 MRP Label Generator")
-
 mode = st.sidebar.radio("Select Mode", ["User", "Admin 👑"])
 
-# -----------------------------
-# Admin Mode
-# -----------------------------
+# ----------------------------- Admin -----------------------------
+
 if mode == "Admin 👑":
     st.subheader("🔐 Admin Login")
     admin_pass = st.text_input("Enter Admin Password", type="password")
-
     if admin_pass == "admin@2025#":
         st.success("Welcome, Admin!")
+
+        st.markdown("### 📁 Current Files in Use")
+
+        if os.path.exists(DATA_PATH):
+            ts = datetime.fromtimestamp(os.path.getmtime(DATA_PATH)).strftime('%d %b %Y, %I:%M %p')
+            st.success(f"🟢 MRP Excel: `{DATA_PATH}` (Last Updated: {ts})")
+            with open(DATA_PATH, "rb") as f:
+                st.download_button("📥 Download Current MRP Excel", f, file_name="latest_data.xlsx")
+        else:
+            st.error("🔴 MRP Excel file not found.")
+
+        if os.path.exists(BARCODE_PDF_PATH):
+            ts = datetime.fromtimestamp(os.path.getmtime(BARCODE_PDF_PATH)).strftime('%d %b %Y, %I:%M %p')
+            st.success(f"🟢 Barcode PDF: `{BARCODE_PDF_PATH}` (Last Updated: {ts})")
+            with open(BARCODE_PDF_PATH, "rb") as f:
+                st.download_button("📥 Download Current Barcode PDF", f, file_name="master_fnsku.pdf")
+        else:
+            st.error("🔴 Barcode PDF file not found.")
+
+        if st.button("🧹 Clear Both Files (MRP + Barcode)"):
+            deleted = clear_files()
+            if deleted:
+                st.success(f"✅ Deleted: {', '.join(deleted)}")
+            else:
+                st.info("ℹ️ Nothing to delete.")
+
+        st.markdown("---")
+        st.subheader("⬆️ Upload New Files")
 
         uploaded_file = st.file_uploader("Upload New Excel Data (.xlsx)", type=["xlsx"])
         if uploaded_file:
             try:
+                backup_file(DATA_PATH, "excel")
                 df = pd.read_excel(uploaded_file)
                 df.to_excel(DATA_PATH, index=False)
-                st.success("✅ File uploaded and saved for users!")
+                st.success("✅ Excel uploaded and backed up!")
             except Exception as e:
-                st.error(f"Error saving file: {e}")
+                st.error(f"❌ Excel upload failed: {e}")
 
         barcode_pdf = st.file_uploader("Upload Master Barcode PDF", type=["pdf"])
         if barcode_pdf:
             try:
+                backup_file(BARCODE_PDF_PATH, "barcode")
                 with open(BARCODE_PDF_PATH, "wb") as f:
                     f.write(barcode_pdf.read())
-                st.success("✅ Barcode PDF uploaded!")
+                st.success("✅ Barcode PDF uploaded and backed up!")
             except Exception as e:
-                st.error(f"Error saving barcode PDF: {e}")
+                st.error(f"❌ Barcode upload failed: {e}")
     else:
         st.warning("Enter the correct password to access admin panel.")
 
-# -----------------------------
-# User Mode
-# -----------------------------
+# ----------------------------- User -----------------------------
+
 else:
-    st.caption("Generate high-quality 48mm x 25mm product labels with batch codes, dates, and pricing.")
-    st.markdown("---")
+    st.caption("Generate 48mm x 25mm labels with pricing, batch code, dates, and barcode.")
 
     if os.path.exists(DATA_PATH):
         try:
-            df = pd.read_excel(DATA_PATH)
+            df = load_data()
 
             st.subheader("🎯 Select Product & Weight")
-
             product_options = sorted(df['Name'].dropna().unique())
-            selected_product = st.selectbox("Select Product", product_options)
-
+            selected_product = st.selectbox("Product", product_options)
             product_weights = sorted(df[df['Name'] == selected_product]['Net Weight'].dropna().unique())
-            selected_weight = st.selectbox("Select Net Weight", product_weights)
+            selected_weight = st.selectbox("Net Weight", product_weights)
 
+            safe_name = sanitize_filename(selected_product)
             filtered_df = df[(df['Name'] == selected_product) & (df['Net Weight'] == selected_weight)]
 
             with st.expander("🔍 Preview Filtered Data"):
                 st.dataframe(filtered_df)
 
-            st.markdown("---")
-            st.subheader("🖨️ Generate Label")
-
             if not filtered_df.empty:
-                if st.button("📥 Download Label PDF"):
-                    pdf_buffer = generate_pdf(filtered_df)
-                    st.download_button(
-                        label="⬇️ Click to Download PDF",
-                        data=pdf_buffer,
-                        file_name=f"{selected_product}_{selected_weight}_Labels.pdf",
-                        mime="application/pdf"
-                    )
+                if st.button("📥 Download MRP Label PDF"):
+                    pdf = generate_pdf(filtered_df)
+                    st.download_button("⬇️ Download Label", data=pdf, file_name=f"{safe_name}_Label.pdf", mime="application/pdf")
 
                 if 'FNSKU' in filtered_df.columns and os.path.exists(BARCODE_PDF_PATH):
                     fnsku_code = str(filtered_df.iloc[0]['FNSKU']).strip()
-                    barcode_pdf = extract_fnsku_page(fnsku_code, BARCODE_PDF_PATH)
+                    barcode = extract_fnsku_page(fnsku_code, BARCODE_PDF_PATH)
+                    if barcode:
+                        st.download_button("📦 Download Barcode", data=barcode, file_name=f"{fnsku_code}_barcode.pdf", mime="application/pdf")
 
-                    if barcode_pdf:
-                        st.download_button(
-                            label="📦 Download Matching Barcode Label",
-                            data=barcode_pdf,
-                            file_name=f"{fnsku_code}_barcode.pdf",
-                            mime="application/pdf"
-                        )
-
-                        # Combined button
-                        combined_pdf = generate_combined_label_pdf(filtered_df, fnsku_code, BARCODE_PDF_PATH)
-                        if combined_pdf:
-                            st.download_button(
-                                label="🧾 Download Combined MRP + Barcode Label",
-                                data=combined_pdf,
-                                file_name=f"{selected_product}_{selected_weight}_Combined.pdf",
-                                mime="application/pdf"
-                            )
+                        combined = generate_combined_label_pdf(filtered_df, fnsku_code, BARCODE_PDF_PATH)
+                        if combined:
+                            st.download_button("🧾 Download Combined Label", data=combined, file_name=f"{safe_name}_Combined.pdf", mime="application/pdf")
                         else:
                             st.info("ℹ️ Could not generate combined label.")
                     else:
-                        st.info("ℹ️ No matching barcode found in uploaded PDF.")
+                        st.warning("⚠️ FNSKU not found in barcode PDF.")
                 else:
-                    st.info("ℹ️ FNSKU not available or barcode PDF not uploaded.")
+                    st.info("ℹ️ FNSKU missing or barcode PDF not uploaded.")
             else:
-                st.warning("⚠️ No matching data found for the selected product and weight.")
-
+                st.warning("⚠️ No matching data found.")
         except Exception as e:
-            st.error(f"❌ Error loading saved data: {e}")
+            st.error(f"❌ Error: {e}")
     else:
-        st.warning("⚠️ No product data found. Please contact admin to upload.")
+        st.warning("⚠️ No product data found. Ask admin to upload.")
